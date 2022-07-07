@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import ftplib
-import pandas as pd
 import base64
 
 # Create a custom logger
@@ -39,54 +38,44 @@ def get_file_ftp(host, path_to_file, ftp_configuration):
             ftp_conn.retrbinary(f'RETR {filename}', wf.write)
 
     file_location = f'{gc_write_dir}/{filename}'
-    logger.info(f'File {path_to_file} has got successfully.')
+    logger.info(f'File {path_to_file} has been successfully received.')
 
     return file_location
 
 
-def transform_to_dataframe(file_location):
-    """Convert data from CSV file to dataframe.
-
-    Args:
-        file_location (str): The location of the file for converting.
-
-    Returns:
-        Dataframe.
-    """
-
-    col_names = ["createdAt", "updatedAt", "shippingDate", "orderId", "productName", "productCategory", "metalType",
-                 "size", "weight", "quantity", "price", "sale", "shippingCost", "orderSum", "orderSource", "city",
-                 "status", "paymentMethod", "clientId", "userId", "phone", "email", "authPhone"]
-
-    df = pd.read_csv(file_location, delimiter=";", encoding="cp1251", header=None, names=col_names, skiprows=1,
-                     dtype={"quantity": "str", "clientId": "str", "userId": "str", "phone": "str", "authPhone": "str"})
-
-    return df
-
-
-def load_data_bq(client, table_id, dataset_id, project_id, data):
+def load_file_bq(file_path, config):
     """Load data to Google BigQuery table.
 
     Args:
-        client: BigQuery Client.
-        table_id (str): The table ID of BigQuery.
-        dataset_id (str): The dataset ID of BigQuery.
-        project_id (str): The project name of Google Cloud account.
-        data (dataframe): Data to be loaded.
+        file_path: Path to the file that has been downloaded.
+        config: Dict with configuration settings for BigQuery load job.
     """
+
+    project_id = config['project_id']
+    dataset_id = config['dataset_id']
+    table_id = config['table_id']
+
     table_ref = f'{project_id}.{dataset_id}.{table_id}'
 
-    job_config = bigquery.LoadJobConfig(
-        time_partitioning=bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY),
-        clustering_fields=['status'])
+    job_config = bigquery.LoadJobConfig()
+    job_config.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY)
+    job_config.source_format = config['source_format']
+    job_config.write_disposition = config['write_disposition']
+    job_config.autodetect = True
 
-    # Make an API request.
-    load_job = client.load_table_from_dataframe(data, table_ref, location='US', job_config=job_config)
+    if config['source_format'] == 'CSV':
+        job_config.field_delimiter = config['delimiter']
+        job_config.skip_leading_rows = 1
+
+    # Load the file into BigQuery table.
+    with open(file_path, 'rb') as f:
+        load_job = bigquery_client.load_table_from_file(f, table_ref, location=config['location'],
+                                                        job_config=job_config)
 
     # Waits for the job to complete.
     load_job.result()
 
-    table = client.get_table(table_ref)
+    table = bigquery_client.get_table(table_ref)
 
     logger.info(f'Successfully loaded data to table {table.table_id}. Loaded {table.num_rows} rows.')
 
@@ -106,18 +95,23 @@ def main(event, context):
 
     if pubsub_message == 'get_ftp_data':
 
-        table_id = event['attributes']['table_id']
-        dataset_id = event['attributes']['dataset_id']
-        project_id = event['attributes']['project_id']
-
-        ftp_host_name = event['attributes']['hostname']
         yesterday = date.today() - timedelta(1)
         str_yesterday = yesterday.strftime('%d-%m-%Y')
+
+        bq_configuration = {
+            'project_id': event['attributes']['project_id'],
+            'dataset_id': event['attributes']['dataset_id'],
+            'table_id': event['attributes']['table_id'],
+            'delimiter': event['attributes']['delimiter'],
+            'source_format': event['attributes']['source_format'].upper(),
+            'location': event['attributes']['location'],
+            'write_disposition': event['attributes']['write_disposition'].upper()
+        }
 
         ftp_configuration = {
             'user': event['attributes']['user'],
             'password': event['attributes']['password'],
-            'path_to_file': f'ftp://{ftp_host_name}/{str_yesterday}.csv'
+            'path_to_file': f"ftp://{event['attributes']['hostname']}/{str_yesterday}.csv"
         }
 
         host = re.sub('ftp://', '', re.findall('ftp://[^/]*', ftp_configuration['path_to_file'])[0])
@@ -128,14 +122,13 @@ def main(event, context):
 
         # Get the file from FTP
         try:
-            source = get_file_ftp(host, path, ftp_configuration)
-        except Exception as e:
+            ftp_file = get_file_ftp(host, path, ftp_configuration)
+        except Exception:
             logger.exception('Exception occurred while getting the file from FTP')
             return 'failed'
 
-        data = transform_to_dataframe(source)
-        load_data_bq(bigquery_client, table_id, dataset_id, project_id, data)
+        load_file_bq(ftp_file, bq_configuration)
 
-        os.remove(source)
+        os.remove(ftp_file)
 
     return 'ok'
