@@ -14,10 +14,11 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-bigquery_client = bigquery.Client()
-
 # The directory for storing temporary files
 gc_write_dir = '/tmp'
+
+# Initialize BigQuery client
+bigquery_client = bigquery.Client()
 
 
 def get_file_ftp(host, path_to_file, ftp_configuration):
@@ -26,7 +27,7 @@ def get_file_ftp(host, path_to_file, ftp_configuration):
     Args:
         host (str): FTP server host.
         path_to_file (str): The path to the file in FTP server.
-        ftp_configuration: FTP configuration.
+        ftp_configuration (dict): FTP configuration.
 
     Returns:
         Full path to the file that has been downloaded.
@@ -47,8 +48,8 @@ def load_file_bq(file_path, config):
     """Load data to Google BigQuery table.
 
     Args:
-        file_path: Path to the file that has been downloaded.
-        config: Dict with configuration settings for BigQuery load job.
+        file_path (str): Path to the file that has been downloaded.
+        config (dict): Configuration settings for BigQuery load job.
     """
 
     project_id = config['project_id']
@@ -124,10 +125,14 @@ def main(event, context):
         try:
             ftp_file = get_file_ftp(host, path, ftp_configuration)
         except Exception:
-            logger.exception('Exception occurred while getting the file from FTP')
+            logger.exception('Exception occurred while getting the file from FTP.')
             return 'failed'
 
-        load_file_bq(ftp_file, bq_configuration)
+        try:
+            load_file_bq(ftp_file, bq_configuration)
+        except Exception:
+            logger.exception('Exception occurred while loading data into BigQuery.')
+            return 'failed'
 
         os.remove(ftp_file)
 
